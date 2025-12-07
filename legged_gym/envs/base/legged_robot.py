@@ -66,9 +66,21 @@ class LeggedRobot(BaseTask):
         self.num_dofs = self.isaac_gym_wrapper.num_dofs
         self.num_bodies = self.isaac_gym_wrapper.num_bodies
         self.dof_names = self.isaac_gym_wrapper.dof_names
-        self.feet_indices = self.isaac_gym_wrapper.feet_indices
-        self.penalised_contact_indices = self.isaac_gym_wrapper.penalised_contact_indices
-        self.termination_contact_indices = self.isaac_gym_wrapper.termination_contact_indices
+        self.body_names = self.isaac_gym_wrapper.body_names
+
+        # Create link indices using wrapper's get_link_ids
+        feet_names = [s for s in self.body_names if self.cfg.asset.foot_name in s]
+        self.feet_indices = self.isaac_gym_wrapper.get_body_ids(feet_names)
+
+        penalized_contact_names = []
+        for name in self.cfg.asset.penalize_contacts_on:
+            penalized_contact_names.extend([s for s in self.body_names if name in s])
+        self.penalised_contact_indices = self.isaac_gym_wrapper.get_body_ids(penalized_contact_names)
+
+        termination_contact_names = []
+        for name in self.cfg.asset.terminate_after_contacts_on:
+            termination_contact_names.extend([s for s in self.body_names if name in s])
+        self.termination_contact_indices = self.isaac_gym_wrapper.get_body_ids(termination_contact_names)
 
         # Bind limits
         self.dof_pos_limits = self.isaac_gym_wrapper.dof_pos_limits

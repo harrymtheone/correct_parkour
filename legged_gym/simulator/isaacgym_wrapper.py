@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from typing import List, Sequence
 
@@ -12,7 +14,7 @@ from legged_gym.utils.helpers import class_to_dict
 
 class IsaacGymWrapper:
     def __init__(self, cfg, sim_device, graphics_device_id, headless):
-        self.gym = gymapi.acquire_gym()
+        self.gym = gymapi.acquire_gym()  # noqa
         self.cfg = cfg
         self.sim_device = sim_device
         self.graphics_device_id = graphics_device_id
@@ -102,22 +104,6 @@ class IsaacGymWrapper:
         self._dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(self._body_names)
         self.num_dofs = len(self._dof_names)
-        feet_names = [s for s in self._body_names if self.cfg.asset.foot_name in s]
-
-        # Initialize indices
-        self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
-
-        # Penalized contacts
-        penalized_contact_names = []
-        for name in self.cfg.asset.penalize_contacts_on:
-            penalized_contact_names.extend([s for s in self._body_names if name in s])
-        self.penalised_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
-
-        # Termination contacts
-        termination_contact_names = []
-        for name in self.cfg.asset.terminate_after_contacts_on:
-            termination_contact_names.extend([s for s in self._body_names if name in s])
-        self.termination_contact_indices = torch.zeros(len(termination_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
 
         base_init_state_list = self.cfg.init_state.pos + self.cfg.init_state.rot + self.cfg.init_state.lin_vel + self.cfg.init_state.ang_vel
         self.base_init_state = torch.tensor(base_init_state_list, device=self.device, requires_grad=False)
@@ -156,16 +142,6 @@ class IsaacGymWrapper:
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
-
-        # Retrieve indices after creation
-        for i in range(len(feet_names)):
-            self.feet_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], feet_names[i])
-
-        for i in range(len(penalized_contact_names)):
-            self.penalised_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], penalized_contact_names[i])
-
-        for i in range(len(termination_contact_names)):
-            self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], termination_contact_names[i])
 
         # Resolve redirect root index
         self._resolve_redirect_root_idx()
@@ -364,49 +340,23 @@ class IsaacGymWrapper:
         return self._rigid_body_state[:, :, 10:13]
 
     # ---------------------------------------- Utility Methods ----------------------------------------
-
-    def get_full_names(self, names, is_link) -> list:
-        """Get full names matching the given pattern."""
-        full_names = []
+    def get_body_ids(self, names: str | Sequence[str]) -> torch.Tensor:
+        """Get link indices for the given names using Isaac Gym API."""
         if isinstance(names, str):
-            names = [names]
+            names = (names,)
+        link_ids = torch.zeros(len(names), dtype=torch.long, device=self.device, requires_grad=False)
+        for i, name in enumerate(names):
+            link_ids[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], name)
+        return link_ids
 
-        for n in names:
-            if is_link:
-                full_names.extend([s for s in self._body_names if n in s])
-            else:
-                full_names.extend([s for s in self._dof_names if n in s])
-
-        assert len(full_names) > 0, f"No names found! {names}, {is_link}"
-        return full_names
-
-    def get_link_ids(self, names: Sequence[str]) -> torch.Tensor:
-        """Get link indices for the given names."""
-        ids = []
-        for name in names:
-            if name in self._body_names:
-                ids.append(self._body_names.index(name))
-            else:
-                raise ValueError(f"Link '{name}' not found in body names: {self._body_names}")
-        return torch.tensor(ids, dtype=torch.long, device=self.device)
-
-    def get_dof_ids(self, names: Sequence[str]) -> torch.Tensor:
-        """Get DOF indices for the given names."""
-        ids = []
-        for name in names:
-            if name in self._dof_names:
-                ids.append(self._dof_names.index(name))
-            else:
-                raise ValueError(f"DOF '{name}' not found in dof names: {self._dof_names}")
-        return torch.tensor(ids, dtype=torch.long, device=self.device)
-
-    def create_indices(self, names, is_link) -> torch.Tensor:
-        """Create indices tensor for the given names."""
-        full_names = self.get_full_names(names, is_link)
-        if is_link:
-            return self.get_link_ids(full_names)
-        else:
-            return self.get_dof_ids(full_names)
+    def get_dof_ids(self, names: str | Sequence[str]) -> torch.Tensor:
+        """Get DOF indices for the given names using Isaac Gym API."""
+        if isinstance(names, str):
+            names = (names,)
+        dof_ids = torch.zeros(len(names), dtype=torch.long, device=self.device, requires_grad=False)
+        for i, name in enumerate(names):
+            dof_ids[i] = self.gym.find_actor_dof_handle(self.envs[0], self.actor_handles[0], name)
+        return dof_ids
 
     # ---------------------------------------- Simulation Methods ----------------------------------------
 

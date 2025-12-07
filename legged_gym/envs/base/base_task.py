@@ -1,9 +1,9 @@
-
 import sys
+
+import torch
 from isaacgym import gymapi
 from isaacgym import gymutil
-import numpy as np
-import torch
+
 
 # Base class for RL tasks
 class BaseTask():
@@ -18,7 +18,7 @@ class BaseTask():
         self.headless = headless
 
         # env device is GPU only if sim is on GPU and use_gpu_pipeline=True, otherwise returned tensors are copied to CPU by physX.
-        if sim_device_type=='cuda' and sim_params.use_gpu_pipeline:
+        if sim_device_type == 'cuda' and sim_params.use_gpu_pipeline:
             self.device = self.sim_device
         else:
             self.device = 'cpu'
@@ -45,7 +45,7 @@ class BaseTask():
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         if self.num_privileged_obs is not None:
             self.privileged_obs_buf = torch.zeros(self.num_envs, self.num_privileged_obs, device=self.device, dtype=torch.float)
-        else: 
+        else:
             self.privileged_obs_buf = None
             # self.num_privileged_obs = self.num_obs
 
@@ -71,7 +71,7 @@ class BaseTask():
 
     def get_observations(self):
         return self.obs_buf
-    
+
     def get_privileged_observations(self):
         return self.privileged_obs_buf
 
