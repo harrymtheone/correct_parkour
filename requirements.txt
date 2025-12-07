@@ -1,0 +1,12 @@
+loguru
+noise
+open3d
+opencv-python-headless
+pygame
+rich
+torch
+torchvision
+warp-lang
+PyQt5
+pyqtgraph
+tensorboard
