@@ -1,3 +1,4 @@
+import inspect
 import os
 import copy
 import torch
@@ -7,6 +8,33 @@ from isaacgym import gymapi
 from isaacgym import gymutil
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
+
+
+def init_config(obj):
+    """Initialize all nested class attributes recursively.
+    
+    Iterates through all attributes of the object. If an attribute is a class,
+    it instantiates it and recursively initializes its members.
+    
+    Args:
+        obj: The config object to initialize.
+        
+    Returns:
+        The initialized config object.
+    """
+    for key in dir(obj):
+        if key == "__class__":
+            continue
+        var = getattr(obj, key)
+        if inspect.isclass(var):
+            # Instantiate the class
+            instance = var()
+            # Set the attribute to the instance instead of the type
+            setattr(obj, key, instance)
+            # Recursively init members of the attribute
+            init_config(instance)
+    return obj
+
 
 def class_to_dict(obj) -> dict:
     if not  hasattr(obj,"__dict__"):
@@ -94,46 +122,32 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     load_path = os.path.join(load_run, model)
     return load_path
 
-def update_cfg_from_args(env_cfg, cfg_train, args):
-    # seed
-    if env_cfg is not None:
-        # num envs
-        if args.num_envs is not None:
-            env_cfg.env.num_envs = args.num_envs
-    if cfg_train is not None:
-        if args.seed is not None:
-            cfg_train.seed = args.seed
-        # alg runner parameters
-        if args.max_iterations is not None:
-            cfg_train.runner.max_iterations = args.max_iterations
-        if args.resume:
-            cfg_train.runner.resume = args.resume
-        if args.experiment_name is not None:
-            cfg_train.runner.experiment_name = args.experiment_name
-        if args.run_name is not None:
-            cfg_train.runner.run_name = args.run_name
-        if args.load_run is not None:
-            cfg_train.runner.load_run = args.load_run
-        if args.checkpoint is not None:
-            cfg_train.runner.checkpoint = args.checkpoint
+def update_cfg_from_args(cfg, args):
+    # alg runner parameters
+    if args.resume:
+        cfg.runner.resume = args.resume
+    cfg.runner.run_name = args.exptid
+    if args.resumeid is not None:
+        cfg.runner.load_run = args.resumeid
+    if args.checkpoint is not None:
+        cfg.runner.checkpoint = args.checkpoint
+    # debug mode
+    if args.debug:
+        cfg.env.num_envs = 32
 
-    return env_cfg, cfg_train
+    return cfg
 
 def get_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "go2", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
-        {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
-        {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
-        {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
+        {"name": "--exptid", "type": str, "required": True, "help": "Name of the experiment run."},
+        {"name": "--resumeid", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         
-        {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
+        {"name": "--debug", "action": "store_true", "default": False, "help": "Debug mode: headless=False, num_envs=32"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
         {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
-        {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
-        {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
-        {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -145,6 +159,13 @@ def get_args():
     args.sim_device = args.sim_device_type
     if args.sim_device=='cuda':
         args.sim_device += f":{args.sim_device_id}"
+    
+    # debug mode sets headless to False
+    if args.debug:
+        args.headless = False
+    else:
+        args.headless = True
+    
     return args
 
 def export_policy_as_jit(actor_critic, path):

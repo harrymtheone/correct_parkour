@@ -371,18 +371,33 @@ class IsaacGymWrapper:
         cam_target = gymapi.Vec3(lookat[0], lookat[1], lookat[2])
         self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
-    def render(self):
+        # Subscribe to keyboard events
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_ESCAPE, "QUIT")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+
+    def render(self, sync_frame_time=True):
         if self.headless or self.viewer is None:
             return
 
+        # Check for window closed
         if self.gym.query_viewer_has_closed(self.viewer):
             import sys
             sys.exit()
 
+        # Check for keyboard events
+        for evt in self.gym.query_viewer_action_events(self.viewer):
+            if evt.action == "QUIT" and evt.value > 0:
+                import sys
+                sys.exit()
+            elif evt.action == "toggle_viewer_sync" and evt.value > 0:
+                self.enable_viewer_sync = not self.enable_viewer_sync
+
+        # Step graphics
         if self.enable_viewer_sync:
             self.gym.step_graphics(self.sim)
             self.gym.draw_viewer(self.viewer, self.sim, True)
-            self.gym.sync_frame_time(self.sim)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
         else:
             self.gym.poll_viewer_events(self.viewer)
 

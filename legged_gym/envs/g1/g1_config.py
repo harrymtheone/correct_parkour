@@ -1,7 +1,8 @@
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
-class G1RoughCfg( LeggedRobotCfg ):
-    class init_state( LeggedRobotCfg.init_state ):
+
+class G1RoughCfg(LeggedRobotCfg):
+    class init_state(LeggedRobotCfg.init_state):
         pos = [0.0, 0.0, 0.8] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
            'left_hip_yaw_joint' : 0. ,   
@@ -24,7 +25,6 @@ class G1RoughCfg( LeggedRobotCfg ):
         num_privileged_obs = 50
         num_actions = 12
 
-
     class domain_rand(LeggedRobotCfg.domain_rand):
         randomize_friction = True
         friction_range = [0.1, 1.25]
@@ -33,12 +33,10 @@ class G1RoughCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_s = 5
         max_push_vel_xy = 1.5
-      
 
-    class control( LeggedRobotCfg.control ):
+    class control(LeggedRobotCfg.control):
         # PD Drive parameters:
         control_type = 'P'
-          # PD Drive parameters:
         stiffness = {'hip_yaw': 100,
                      'hip_roll': 100,
                      'hip_pitch': 100,
@@ -56,7 +54,7 @@ class G1RoughCfg( LeggedRobotCfg ):
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
 
-    class asset( LeggedRobotCfg.asset ):
+    class asset(LeggedRobotCfg.asset):
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_12dof.urdf'
         name = "g1"
         foot_name = "ankle_roll"
@@ -65,11 +63,11 @@ class G1RoughCfg( LeggedRobotCfg ):
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         flip_visual_attachments = False
   
-    class rewards( LeggedRobotCfg.rewards ):
+    class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.78
         
-        class scales( LeggedRobotCfg.rewards.scales ):
+        class scales(LeggedRobotCfg.rewards.scales):
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
@@ -88,8 +86,7 @@ class G1RoughCfg( LeggedRobotCfg ):
             feet_swing_height = -20.0
             contact = 0.18
 
-class G1RoughCfgPPO( LeggedRobotCfgPPO ):
-    class policy:
+    class policy(LeggedRobotCfg.policy):
         init_noise_std = 0.8
         actor_hidden_dims = [32]
         critic_hidden_dims = [32]
@@ -99,12 +96,11 @@ class G1RoughCfgPPO( LeggedRobotCfgPPO ):
         rnn_hidden_size = 64
         rnn_num_layers = 1
         
-    class algorithm( LeggedRobotCfgPPO.algorithm ):
+    class algorithm(LeggedRobotCfg.algorithm):
         entropy_coef = 0.01
-    class runner( LeggedRobotCfgPPO.runner ):
+
+    class runner(LeggedRobotCfg.runner):
         policy_class_name = "ActorCriticRecurrent"
         max_iterations = 10000
         run_name = ''
         experiment_name = 'g1'
-
-  

@@ -58,8 +58,6 @@ class LeggedRobot(BaseTask):
         self.sim = self.isaac_gym_wrapper.sim
         self.gym = self.isaac_gym_wrapper.gym
         self.viewer = self.isaac_gym_wrapper.viewer
-        self.envs = self.isaac_gym_wrapper.envs
-        self.actor_handles = self.isaac_gym_wrapper.actor_handles
 
         # Bind robot properties
         self.num_dof = self.isaac_gym_wrapper.num_dof
@@ -246,7 +244,7 @@ class LeggedRobot(BaseTask):
 
     def render(self, sync_frame_time=True):
         # Delegate render to wrapper
-        self.isaac_gym_wrapper.render()
+        self.isaac_gym_wrapper.render(sync_frame_time)
 
     # ----------------------------------------
     def _init_buffers(self):
