@@ -46,6 +46,7 @@ class IsaacGymWrapper:
         self._create_sim()
         self._create_ground_plane()
         self._create_envs()
+        self.gym.prepare_sim(self.sim)
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
