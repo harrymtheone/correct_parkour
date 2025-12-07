@@ -2,6 +2,7 @@ import copy
 import inspect
 import os
 import random
+from dataclasses import MISSING
 
 import numpy as np
 import torch
@@ -9,30 +10,65 @@ from isaacgym import gymapi
 from isaacgym import gymutil
 
 
-def init_config(obj):
-    """Initialize all nested class attributes recursively.
+def init_config(obj, _check_missing: bool = True):
+    """Initialize all nested class attributes recursively and validate MISSING values.
     
     Iterates through all attributes of the object. If an attribute is a class,
     it instantiates it and recursively initializes its members.
     
     Args:
         obj: The config object to initialize.
+        _check_missing: Whether to check for MISSING values after initialization.
         
     Returns:
         The initialized config object.
+        
+    Raises:
+        ValueError: If any attribute is MISSING.
     """
+    # First pass: instantiate all nested classes
     for key in dir(obj):
-        if key == "__class__":
+        if key.startswith("_"):
             continue
         var = getattr(obj, key)
         if inspect.isclass(var):
-            # Instantiate the class
             instance = var()
-            # Set the attribute to the instance instead of the type
             setattr(obj, key, instance)
-            # Recursively init members of the attribute
-            init_config(instance)
+            init_config(instance, _check_missing=False)
+    
+    # Only check for MISSING at the top level call
+    if _check_missing:
+        missing = _find_missing_attrs(obj, "")
+        if missing:
+            raise ValueError(
+                f"Config has MISSING required attributes: {missing}. "
+                "Please set these values before initialization."
+            )
+    
     return obj
+
+
+def _find_missing_attrs(obj, path: str) -> list:
+    """Recursively find all MISSING values in a config object."""
+    missing_attrs = []
+    
+    for key in dir(obj):
+        if key.startswith("_") or callable(getattr(obj, key, None)):
+            continue
+        try:
+            var = getattr(obj, key)
+        except AttributeError:
+            continue
+            
+        attr_path = f"{path}.{key}" if path else key
+        
+        if var is MISSING:
+            missing_attrs.append(attr_path)
+        elif hasattr(var, "__dict__"):
+            # Recursively check nested objects
+            missing_attrs.extend(_find_missing_attrs(var, attr_path))
+    
+    return missing_attrs
 
 
 def class_to_dict(obj) -> dict:
