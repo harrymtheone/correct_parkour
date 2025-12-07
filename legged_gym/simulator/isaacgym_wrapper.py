@@ -1,4 +1,5 @@
 import os
+from typing import List, Sequence
 
 import numpy as np
 import torch
@@ -22,19 +23,23 @@ class IsaacGymWrapper:
         self.viewer = None
         self.enable_viewer_sync = True
 
-        # Buffers
-        self.root_states = None
-        self.dof_state = None
-        self.dof_pos = None
-        self.dof_vel = None
-        self.base_quat = None
-        self.rpy = None
-        self.base_pos = None
-        self.base_lin_vel = None
-        self.base_ang_vel = None
-        self.projected_gravity = None
-        self.contact_forces = None
-        self.torques = None
+        # Internal buffers (use properties to access)
+        self._root_states = None
+        self._dof_state = None
+        self._dof_pos = None
+        self._dof_vel = None
+        self._rigid_body_state = None
+        self._contact_forces = None
+
+        # Body/DOF names
+        self._body_names: List[str] = []
+        self._dof_names: List[str] = []
+
+        # Redirect root support (for robots where base link is not the "root")
+        self.redirect_root_to = getattr(cfg.asset, 'redirect_root_to', None)
+        self.redirect_root_idx = None
+
+        self.init_done = False
 
         self._create_sim()
         self._create_ground_plane()
@@ -93,11 +98,11 @@ class IsaacGymWrapper:
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
 
         # save body names from the asset
-        body_names = self.gym.get_asset_rigid_body_names(robot_asset)
-        self.dof_names = self.gym.get_asset_dof_names(robot_asset)
-        self.num_bodies = len(body_names)
-        self.num_dofs = len(self.dof_names)
-        feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
+        self._body_names = self.gym.get_asset_rigid_body_names(robot_asset)
+        self._dof_names = self.gym.get_asset_dof_names(robot_asset)
+        self.num_bodies = len(self._body_names)
+        self.num_dofs = len(self._dof_names)
+        feet_names = [s for s in self._body_names if self.cfg.asset.foot_name in s]
 
         # Initialize indices
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
@@ -105,13 +110,13 @@ class IsaacGymWrapper:
         # Penalized contacts
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
-            penalized_contact_names.extend([s for s in body_names if name in s])
+            penalized_contact_names.extend([s for s in self._body_names if name in s])
         self.penalised_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
 
         # Termination contacts
         termination_contact_names = []
         for name in self.cfg.asset.terminate_after_contacts_on:
-            termination_contact_names.extend([s for s in body_names if name in s])
+            termination_contact_names.extend([s for s in self._body_names if name in s])
         self.termination_contact_indices = torch.zeros(len(termination_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
 
         base_init_state_list = self.cfg.init_state.pos + self.cfg.init_state.rot + self.cfg.init_state.lin_vel + self.cfg.init_state.ang_vel
@@ -162,6 +167,9 @@ class IsaacGymWrapper:
         for i in range(len(termination_contact_names)):
             self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], termination_contact_names[i])
 
+        # Resolve redirect root index
+        self._resolve_redirect_root_idx()
+
     def _get_env_origins(self):
         self.custom_origins = False
         self.env_origins = torch.zeros(self.cfg.env.num_envs, 3, device=self.device, requires_grad=False)
@@ -203,22 +211,204 @@ class IsaacGymWrapper:
             props[0].mass += np.random.uniform(rng[0], rng[1])
         return props
 
+    def _resolve_redirect_root_idx(self):
+        """Resolve the index for redirecting root queries to a specific link."""
+        if self.redirect_root_to is not None:
+            if self.redirect_root_to in self._body_names:
+                self.redirect_root_idx = self._body_names.index(self.redirect_root_to)
+                print(f"Redirecting root to {self.redirect_root_to} (index {self.redirect_root_idx})")
+            else:
+                raise ValueError(f"redirect_root_to '{self.redirect_root_to}' not found in body names: {self._body_names}")
+
     def init_buffers(self):
+        """Acquire and wrap simulation state tensors."""
+        # Acquire tensors
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
+        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
+
+        # Refresh tensors
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
 
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)
-        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
-        self.dof_pos = self.dof_state.view(self.cfg.env.num_envs, self.num_dof, 2)[..., 0]
-        self.dof_vel = self.dof_state.view(self.cfg.env.num_envs, self.num_dof, 2)[..., 1]
-        self.base_quat = self.root_states[:, 3:7]
-        # self.rpy = get_euler_xyz_in_tensor(self.base_quat) # Moved to LeggedRobot or wrapper
-        self.base_pos = self.root_states[:self.cfg.env.num_envs, 0:3]
-        self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.cfg.env.num_envs, -1, 3)
+        # Wrap tensors
+        self._root_states = gymtorch.wrap_tensor(actor_root_state)
+        self._dof_state = gymtorch.wrap_tensor(dof_state_tensor)
+        self._dof_pos = self._dof_state.view(self.cfg.env.num_envs, self.num_dof, 2)[..., 0]
+        self._dof_vel = self._dof_state.view(self.cfg.env.num_envs, self.num_dof, 2)[..., 1]
+        self._contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.cfg.env.num_envs, -1, 3)
+
+        # Rigid body state: (num_envs * num_bodies, 13) -> (num_envs, num_bodies, 13)
+        # Format: [pos(3), quat(4), lin_vel(3), ang_vel(3)]
+        self._rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(self.cfg.env.num_envs, self.num_bodies, 13)
+
+        self.init_done = True
+
+    # ---------------------------------------- State Properties ----------------------------------------
+
+    @property
+    def dof_names(self):
+        """List of DOF names."""
+        return self._dof_names
+
+    @property
+    def body_names(self):
+        """List of rigid body names."""
+        return self._body_names
+
+    # Legacy attribute access (for backward compatibility)
+    @property
+    def root_states(self):
+        """Root states tensor (num_envs, 13): [pos(3), quat(4), lin_vel(3), ang_vel(3)]."""
+        return self._root_states
+
+    @property
+    def dof_state(self):
+        """DOF state tensor."""
+        return self._dof_state
+
+    @property
+    def dof_pos(self):
+        """DOF positions (num_envs, num_dof)."""
+        return self._dof_pos
+
+    @property
+    def dof_vel(self):
+        """DOF velocities (num_envs, num_dof)."""
+        return self._dof_vel
+
+    @property
+    def base_quat(self):
+        """Base quaternion (num_envs, 4) in (x, y, z, w) format."""
+        return self._root_states[:, 3:7]
+
+    @property
+    def base_pos(self):
+        """Base position (num_envs, 3)."""
+        return self._root_states[:self.cfg.env.num_envs, 0:3]
+
+    @property
+    def contact_forces(self):
+        """Contact forces (num_envs, num_bodies, 3)."""
+        return self._contact_forces
+
+    # ---------------------------------------- Root State Properties ----------------------------------------
+
+    @property
+    def root_pos_w(self):
+        """Root position in world frame (num_envs, 3)."""
+        if self.redirect_root_idx is None:
+            return self._get_root_pos_w()
+        return self.link_pos_w[:, self.redirect_root_idx]
+
+    def _get_root_pos_w(self):
+        """Get root position from root state tensor."""
+        return self._root_states[:, 0:3]
+
+    @property
+    def root_quat_w(self):
+        """Root quaternion in world frame (num_envs, 4) in (x, y, z, w) format."""
+        if self.redirect_root_idx is None:
+            return self._get_root_quat_w()
+        return self.link_quat_w[:, self.redirect_root_idx]
+
+    def _get_root_quat_w(self):
+        """Get root quaternion from root state tensor."""
+        return self._root_states[:, 3:7]
+
+    @property
+    def root_lin_vel_w(self):
+        """Root linear velocity in world frame (num_envs, 3)."""
+        if self.redirect_root_idx is None:
+            return self._get_root_lin_vel_w()
+        return self.link_lin_vel_w[:, self.redirect_root_idx]
+
+    def _get_root_lin_vel_w(self):
+        """Get root linear velocity from root state tensor."""
+        return self._root_states[:, 7:10]
+
+    @property
+    def root_ang_vel_w(self):
+        """Root angular velocity in world frame (num_envs, 3)."""
+        if self.redirect_root_idx is None:
+            return self._get_root_ang_vel_w()
+        return self.link_ang_vel_w[:, self.redirect_root_idx]
+
+    def _get_root_ang_vel_w(self):
+        """Get root angular velocity from root state tensor."""
+        return self._root_states[:, 10:13]
+
+    # ---------------------------------------- Link State Properties ----------------------------------------
+
+    @property
+    def link_pos_w(self):
+        """Link positions in world frame (num_envs, num_bodies, 3)."""
+        return self._rigid_body_state[:, :, 0:3]
+
+    @property
+    def link_quat_w(self):
+        """Link quaternions in world frame (num_envs, num_bodies, 4) in (x, y, z, w) format."""
+        return self._rigid_body_state[:, :, 3:7]
+
+    @property
+    def link_lin_vel_w(self):
+        """Link linear velocities in world frame (num_envs, num_bodies, 3)."""
+        return self._rigid_body_state[:, :, 7:10]
+
+    @property
+    def link_ang_vel_w(self):
+        """Link angular velocities in world frame (num_envs, num_bodies, 3)."""
+        return self._rigid_body_state[:, :, 10:13]
+
+    # ---------------------------------------- Utility Methods ----------------------------------------
+
+    def get_full_names(self, names, is_link) -> list:
+        """Get full names matching the given pattern."""
+        full_names = []
+        if isinstance(names, str):
+            names = [names]
+
+        for n in names:
+            if is_link:
+                full_names.extend([s for s in self._body_names if n in s])
+            else:
+                full_names.extend([s for s in self._dof_names if n in s])
+
+        assert len(full_names) > 0, f"No names found! {names}, {is_link}"
+        return full_names
+
+    def get_link_ids(self, names: Sequence[str]) -> torch.Tensor:
+        """Get link indices for the given names."""
+        ids = []
+        for name in names:
+            if name in self._body_names:
+                ids.append(self._body_names.index(name))
+            else:
+                raise ValueError(f"Link '{name}' not found in body names: {self._body_names}")
+        return torch.tensor(ids, dtype=torch.long, device=self.device)
+
+    def get_dof_ids(self, names: Sequence[str]) -> torch.Tensor:
+        """Get DOF indices for the given names."""
+        ids = []
+        for name in names:
+            if name in self._dof_names:
+                ids.append(self._dof_names.index(name))
+            else:
+                raise ValueError(f"DOF '{name}' not found in dof names: {self._dof_names}")
+        return torch.tensor(ids, dtype=torch.long, device=self.device)
+
+    def create_indices(self, names, is_link) -> torch.Tensor:
+        """Create indices tensor for the given names."""
+        full_names = self.get_full_names(names, is_link)
+        if is_link:
+            return self.get_link_ids(full_names)
+        else:
+            return self.get_dof_ids(full_names)
+
+    # ---------------------------------------- Simulation Methods ----------------------------------------
 
     def prepare_sim(self):
         self.gym.prepare_sim(self.sim)
@@ -260,6 +450,9 @@ class IsaacGymWrapper:
 
     def refresh_net_contact_force_tensor(self):
         self.gym.refresh_net_contact_force_tensor(self.sim)
+
+    def refresh_rigid_body_state_tensor(self):
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
 
     def set_dof_actuation_force_tensor(self, torques):
         self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(torques))
