@@ -15,7 +15,11 @@ class DataBuf:
         self.n_envs = n_envs
         self.n_trans_per_env = n_trans_per_env
         self.device = device
-        self.buf = torch.zeros(n_trans_per_env, n_envs, *shape, dtype=dtype, device=self.device)
+        self.buf = torch.zeros(
+            n_trans_per_env, n_envs, *shape,
+            dtype=dtype,
+            device=self.device
+        )
 
     def set(self, idx: int, value: torch.Tensor):
         self.buf[idx] = value
@@ -41,7 +45,11 @@ class HiddenBuf:
         self.device = device
         # hidden states are usually [num_layers, num_envs, hidden_size]
         # buffer will be [n_trans_per_env, num_layers, num_envs, hidden_size]
-        self.buf = torch.zeros(n_trans_per_env, *shape, dtype=dtype, device=self.device)
+        self.buf = torch.zeros(
+            n_trans_per_env, *shape,
+            dtype=dtype,
+            device=self.device
+        )
 
     def set(self, idx: int, value: torch.Tensor):
         self.buf[idx].copy_(value)
@@ -96,8 +104,11 @@ class RolloutStorageV2:
                 # Create buffer outside inference mode to allow gradient computation later
                 with torch.inference_mode(False):
                     self.hidden_states_storage[name] = HiddenBuf(
-                        self.num_envs, self.num_transitions_per_env,
-                        hidden_states.shape, hidden_states.dtype, self.device
+                        self.num_envs,
+                        self.num_transitions_per_env,
+                        hidden_states.shape,
+                        hidden_states.dtype,
+                        self.device
                     )
 
         if name in self.hidden_states_storage:
@@ -121,7 +132,13 @@ class RolloutStorageV2:
             # Value shape is expected to be [num_envs, ...]
             # Create buffer outside inference mode to allow gradient computation later
             with torch.inference_mode(False):
-                self.storage[name] = DataBuf(self.num_envs, self.num_transitions_per_env, value.shape[1:], value.dtype, self.device)
+                self.storage[name] = DataBuf(
+                    self.num_envs,
+                    self.num_transitions_per_env,
+                    value.shape[1:],
+                    value.dtype,
+                    self.device
+                )
 
     def clear(self):
         self.step = 0

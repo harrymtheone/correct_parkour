@@ -6,64 +6,68 @@ import torch.optim as optim
 from torch.distributions import Normal, kl_divergence
 
 from rsl_rl.algorithms.alg_base import BaseAlgorithm
-from rsl_rl.modules import ActorCritic
+from rsl_rl.env import VecEnv
 from rsl_rl.storage import RolloutStorageV2
+from .networks import ActorCritic, ActorCriticRecurrent, ActorCriticCfg, ActorCriticRecurrentCfg
+
+
+class PPOBaselineCfg:
+    networks: ActorCriticRecurrentCfg = ActorCriticRecurrentCfg()
+
+    class ppo:
+        num_learning_epochs: int = 1
+        num_mini_batches: int = 1
+        clip_param: float = 0.2
+        gamma: float = 0.998
+        lam: float = 0.95
+        value_loss_coef: float = 1.0
+        entropy_coef: float = 0.0
+        learning_rate: float = 1e-3
+        max_grad_norm: float = 1.0
+        use_clipped_value_loss: bool = True
+        schedule: str = "fixed"
+        desired_kl: float = 0.01
 
 
 class PPOBaseline(BaseAlgorithm):
     actor_critic: ActorCritic
 
-    def __init__(self,
-                 actor_critic,
-                 num_learning_epochs=1,
-                 num_mini_batches=1,
-                 clip_param=0.2,
-                 gamma=0.998,
-                 lam=0.95,
-                 value_loss_coef=1.0,
-                 entropy_coef=0.0,
-                 learning_rate=1e-3,
-                 max_grad_norm=1.0,
-                 use_clipped_value_loss=True,
-                 schedule="fixed",
-                 desired_kl=0.01,
-                 device='cpu',
-                 ):
+    def __init__(self, env: VecEnv, cfg: PPOBaselineCfg):
+        super().__init__(env)
 
-        self.device = device
+        # Create actor_critic based on networks cfg type
+        if isinstance(cfg.networks, ActorCriticRecurrentCfg):
+            self.actor_critic = ActorCriticRecurrent(cfg.networks).to(self.device)
+        else:
+            self.actor_critic = ActorCritic(cfg.networks).to(self.device)
 
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
+        # PPO parameters from config
+        self.desired_kl = cfg.ppo.desired_kl
+        self.schedule = cfg.ppo.schedule
+        self.learning_rate = cfg.ppo.learning_rate
+        self.clip_param = cfg.ppo.clip_param
+        self.num_learning_epochs = cfg.ppo.num_learning_epochs
+        self.num_mini_batches = cfg.ppo.num_mini_batches
+        self.value_loss_coef = cfg.ppo.value_loss_coef
+        self.entropy_coef = cfg.ppo.entropy_coef
+        self.gamma = cfg.ppo.gamma
+        self.lam = cfg.ppo.lam
+        self.max_grad_norm = cfg.ppo.max_grad_norm
+        self.use_clipped_value_loss = cfg.ppo.use_clipped_value_loss
 
         # PPO components
-        self.actor_critic = actor_critic
-        self.actor_critic.to(self.device)
-        self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=self.learning_rate)
 
         # Hidden states for recurrent policies (managed here, not in actor_critic)
         self.actor_hidden = None
         self.critic_hidden = None
 
-        # PPO parameters
-        self.clip_param = clip_param
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-        self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
-        self.gamma = gamma
-        self.lam = lam
-        self.max_grad_norm = max_grad_norm
-        self.use_clipped_value_loss = use_clipped_value_loss
+    def init_storage(self, num_transitions_per_env):
+        self.storage = RolloutStorageV2(self.num_envs, num_transitions_per_env, self.device)
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = RolloutStorageV2(num_envs, num_transitions_per_env, self.device)
-        self.num_envs = num_envs
-        
         # Initialize hidden states for recurrent policies
         if self.actor_critic.is_recurrent:
-            self.actor_hidden, self.critic_hidden = self.actor_critic.init_hidden_states(num_envs, self.device)
+            self.actor_hidden, self.critic_hidden = self.actor_critic.init_hidden_states(self.num_envs, self.device)
 
     def eval(self):
         self.actor_critic.test()
@@ -89,7 +93,7 @@ class PPOBaseline(BaseAlgorithm):
                 self.storage.add_hidden_states('actor_c', self.actor_hidden[1])
             else:
                 self.storage.add_hidden_states('actor_h', self.actor_hidden)
-            
+
             if isinstance(self.critic_hidden, tuple):
                 self.storage.add_hidden_states('critic_h', self.critic_hidden[0])
                 self.storage.add_hidden_states('critic_c', self.critic_hidden[1])
@@ -138,7 +142,7 @@ class PPOBaseline(BaseAlgorithm):
         """Reset hidden states for done environments."""
         if not self.actor_critic.is_recurrent:
             return
-            
+
         # Reset hidden states for done environments
         if isinstance(self.actor_hidden, tuple):
             # LSTM: reset both h and c
@@ -147,7 +151,7 @@ class PPOBaseline(BaseAlgorithm):
         else:
             # GRU: reset single hidden state
             self.actor_hidden[..., dones, :] = 0.0
-            
+
         if isinstance(self.critic_hidden, tuple):
             self.critic_hidden[0][..., dones, :] = 0.0
             self.critic_hidden[1][..., dones, :] = 0.0
@@ -184,14 +188,14 @@ class PPOBaseline(BaseAlgorithm):
             old_actions_log_prob_batch = batch['actions_log_prob']
             old_mu_batch = batch['action_mean']
             old_sigma_batch = batch['action_sigma']
-            
+
             # Get hidden states for recurrent policies
             if self.actor_critic.is_recurrent:
                 actor_h = batch.get('actor_h')
                 actor_c = batch.get('actor_c')
                 critic_h = batch.get('critic_h')
                 critic_c = batch.get('critic_c')
-                
+
                 if actor_c is not None:
                     actor_hidden = (actor_h, actor_c)
                     critic_hidden = (critic_h, critic_c)
@@ -210,7 +214,7 @@ class PPOBaseline(BaseAlgorithm):
             entropy_batch = self.actor_critic.entropy
 
             # KL
-            if self.desired_kl != None and self.schedule == 'adaptive':
+            if self.desired_kl is not None and self.schedule == 'adaptive':
                 with torch.inference_mode():
                     old_dist = Normal(old_mu_batch, old_sigma_batch)
                     new_dist = Normal(mu_batch, sigma_batch)
@@ -219,7 +223,7 @@ class PPOBaseline(BaseAlgorithm):
 
                     if kl_mean > self.desired_kl * 2.0:
                         self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                    elif self.desired_kl / 2.0 > kl_mean > 0.0:
                         self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
                     for param_group in self.optimizer.param_groups:
@@ -235,7 +239,7 @@ class PPOBaseline(BaseAlgorithm):
             # Value function loss
             if self.use_clipped_value_loss:
                 value_clipped = values_batch + (value_batch - values_batch).clamp(-self.clip_param,
-                                                                                                self.clip_param)
+                                                                                  self.clip_param)
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()

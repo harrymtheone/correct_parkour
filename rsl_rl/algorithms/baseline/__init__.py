@@ -1,1 +1,1 @@
-from .baseline import PPOBaseline
+from .baseline import PPOBaseline, PPOBaselineCfg

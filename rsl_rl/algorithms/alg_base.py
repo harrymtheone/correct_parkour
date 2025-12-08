@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from rsl_rl.env import VecEnv
+
 
 class BaseAlgorithm:
     """Base class for all RL algorithms.
@@ -11,6 +13,17 @@ class BaseAlgorithm:
     Algorithms inheriting from this class work with dict-based observations
     and are compatible with the generic Runner class.
     """
+
+    def __init__(self, env: VecEnv):
+        self.env = env
+
+    @property
+    def num_envs(self) -> int:
+        return self.env.num_envs
+
+    @property
+    def device(self) -> str:
+        return self.env.device
 
     def act(self, obs: dict[str, torch.Tensor], **kwargs) -> torch.Tensor:
         """Select actions given observations during training.

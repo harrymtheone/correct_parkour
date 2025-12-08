@@ -54,7 +54,6 @@ class Runner:
             env: VecEnv,
             alg: BaseAlgorithm,
             cfg: RunnerCfg,
-            device: str = 'cpu',
     ):
         """Initialize the runner.
         
@@ -62,12 +61,10 @@ class Runner:
             env: Vectorized environment
             alg: Algorithm instance (must inherit from BaseAlgorithm)
             cfg: Runner configuration
-            device: Device to use
         """
         self.env = env
         self.alg = alg
         self.cfg = cfg
-        self.device = device
         
         # Extract config values
         self.num_steps_per_env = cfg.num_steps_per_env
@@ -79,6 +76,10 @@ class Runner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+
+    @property
+    def device(self):
+        return self.env.device
 
     def learn(self, num_learning_iterations: int = None, init_at_random_ep_len: bool = False):
         """Run training loop.
