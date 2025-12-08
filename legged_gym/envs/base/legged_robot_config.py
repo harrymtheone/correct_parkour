@@ -1,6 +1,6 @@
-class LeggedRobotCfg:
-    seed = 1
+from .base_config import BaseConfig
 
+class LeggedRobotCfg(BaseConfig):
     class env:
         num_envs = 4096
         num_observations = 48
@@ -170,6 +170,9 @@ class LeggedRobotCfg:
             default_buffer_size_multiplier = 5
             contact_collection = 2 # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
 
+class LeggedRobotCfgPPO(BaseConfig):
+    seed = 1
+    runner_class_name = 'OnPolicyRunner'
     class policy:
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 128]
@@ -196,7 +199,6 @@ class LeggedRobotCfg:
         max_grad_norm = 1.
 
     class runner:
-        runner_class_name = 'OnPolicyRunner'
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24 # per iteration

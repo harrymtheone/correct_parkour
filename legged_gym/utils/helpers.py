@@ -1,78 +1,15 @@
-import copy
-import inspect
 import os
-import random
-from dataclasses import MISSING
-
-import numpy as np
+import copy
 import torch
+import numpy as np
+import random
 from isaacgym import gymapi
 from isaacgym import gymutil
 
-
-def init_config(obj, _check_missing: bool = True):
-    """Initialize all nested class attributes recursively and validate MISSING values.
-    
-    Iterates through all attributes of the object. If an attribute is a class,
-    it instantiates it and recursively initializes its members.
-    
-    Args:
-        obj: The config object to initialize.
-        _check_missing: Whether to check for MISSING values after initialization.
-        
-    Returns:
-        The initialized config object.
-        
-    Raises:
-        ValueError: If any attribute is MISSING.
-    """
-    # First pass: instantiate all nested classes
-    for key in dir(obj):
-        if key.startswith("_"):
-            continue
-        var = getattr(obj, key)
-        if inspect.isclass(var):
-            instance = var()
-            setattr(obj, key, instance)
-            init_config(instance, _check_missing=False)
-    
-    # Only check for MISSING at the top level call
-    if _check_missing:
-        missing = _find_missing_attrs(obj, "")
-        if missing:
-            raise ValueError(
-                f"Config has MISSING required attributes: {missing}. "
-                "Please set these values before initialization."
-            )
-    
-    return obj
-
-
-def _find_missing_attrs(obj, path: str) -> list:
-    """Recursively find all MISSING values in a config object."""
-    missing_attrs = []
-    
-    for key in dir(obj):
-        if key.startswith("_") or callable(getattr(obj, key, None)):
-            continue
-        try:
-            var = getattr(obj, key)
-        except AttributeError:
-            continue
-            
-        attr_path = f"{path}.{key}" if path else key
-        
-        if var is MISSING:
-            missing_attrs.append(attr_path)
-        elif hasattr(var, "__dict__"):
-            # Recursively check nested objects
-            missing_attrs.extend(_find_missing_attrs(var, attr_path))
-    
-    return missing_attrs
-
+from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 
 def class_to_dict(obj) -> dict:
-    if not hasattr(obj, "__dict__"):
+    if not  hasattr(obj,"__dict__"):
         return obj
     result = {}
     for key in dir(obj):
@@ -88,7 +25,6 @@ def class_to_dict(obj) -> dict:
         result[key] = element
     return result
 
-
 def update_class_from_dict(obj, dict):
     for key, val in dict.items():
         attr = getattr(obj, key, None)
@@ -98,19 +34,17 @@ def update_class_from_dict(obj, dict):
             setattr(obj, key, val)
     return
 
-
 def set_seed(seed):
     if seed == -1:
         seed = np.random.randint(0, 10000)
     print("Setting seed: {}".format(seed))
-
+    
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 def parse_sim_params(args, cfg):
     # code from Isaac Gym Preview 2
@@ -136,59 +70,70 @@ def parse_sim_params(args, cfg):
 
     return sim_params
 
-
 def get_load_path(root, load_run=-1, checkpoint=-1):
     try:
         runs = os.listdir(root)
-        # TODO sort by date to handle change of month
+        #TODO sort by date to handle change of month
         runs.sort()
         if 'exported' in runs: runs.remove('exported')
         last_run = os.path.join(root, runs[-1])
     except:
         raise ValueError("No runs in this directory: " + root)
-    if load_run == -1:
+    if load_run==-1:
         load_run = last_run
     else:
         load_run = os.path.join(root, load_run)
 
-    if checkpoint == -1:
+    if checkpoint==-1:
         models = [file for file in os.listdir(load_run) if 'model' in file]
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         model = models[-1]
     else:
-        model = "model_{}.pt".format(checkpoint)
+        model = "model_{}.pt".format(checkpoint) 
 
     load_path = os.path.join(load_run, model)
     return load_path
 
+def update_cfg_from_args(env_cfg, cfg_train, args):
+    # seed
+    if env_cfg is not None:
+        # num envs
+        if args.num_envs is not None:
+            env_cfg.env.num_envs = args.num_envs
+    if cfg_train is not None:
+        if args.seed is not None:
+            cfg_train.seed = args.seed
+        # alg runner parameters
+        if args.max_iterations is not None:
+            cfg_train.runner.max_iterations = args.max_iterations
+        if args.resume:
+            cfg_train.runner.resume = args.resume
+        if args.experiment_name is not None:
+            cfg_train.runner.experiment_name = args.experiment_name
+        if args.run_name is not None:
+            cfg_train.runner.run_name = args.run_name
+        if args.load_run is not None:
+            cfg_train.runner.load_run = args.load_run
+        if args.checkpoint is not None:
+            cfg_train.runner.checkpoint = args.checkpoint
 
-def update_cfg_from_args(cfg, args):
-    # alg runner parameters
-    if args.resume:
-        cfg.runner.resume = args.resume
-    cfg.runner.run_name = args.exptid
-    if args.resumeid is not None:
-        cfg.runner.load_run = args.resumeid
-    if args.checkpoint is not None:
-        cfg.runner.checkpoint = args.checkpoint
-    # debug mode
-    if args.debug:
-        cfg.env.num_envs = 32
-
-    return cfg
-
+    return env_cfg, cfg_train
 
 def get_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "go2", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
-        {"name": "--resume", "action": "store_true", "default": False, "help": "Resume training from a checkpoint"},
-        {"name": "--exptid", "type": str, "required": True, "help": "Name of the experiment run."},
-        {"name": "--resumeid", "type": str, "help": "Name of the run to load when resume=True. If -1: will load the last run."},
-        {"name": "--checkpoint", "type": int, "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
-
-        {"name": "--debug", "action": "store_true", "default": False, "help": "Debug mode: headless=False, num_envs=32"},
+        {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
+        {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
+        {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
+        {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
+        {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
+        
+        {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
         {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
+        {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
+        {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
+        {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -198,24 +143,16 @@ def get_args():
     # name allignment
     args.sim_device_id = args.compute_device_id
     args.sim_device = args.sim_device_type
-    if args.sim_device == 'cuda':
+    if args.sim_device=='cuda':
         args.sim_device += f":{args.sim_device_id}"
-
-    # debug mode sets headless to False
-    if args.debug:
-        args.headless = False
-    else:
-        args.headless = True
-
     return args
-
 
 def export_policy_as_jit(actor_critic, path):
     if hasattr(actor_critic, 'memory_a'):
         # assumes LSTM: TODO add GRU
         exporter = PolicyExporterLSTM(actor_critic)
         exporter.export(path)
-    else:
+    else: 
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, 'policy_1.pt')
         model = copy.deepcopy(actor_critic.actor).to('cpu')
@@ -243,10 +180,12 @@ class PolicyExporterLSTM(torch.nn.Module):
     def reset_memory(self):
         self.hidden_state[:] = 0.
         self.cell_state[:] = 0.
-
+ 
     def export(self, path):
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, 'policy_lstm_1.pt')
         self.to('cpu')
         traced_script_module = torch.jit.script(self)
         traced_script_module.save(path)
+
+    

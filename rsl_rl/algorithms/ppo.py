@@ -90,9 +90,9 @@ class PPO:
     def act(self, obs, critic_obs):
         if self.actor_critic.is_recurrent:
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
-        # Compute the actions and values (seq_dim=False for single-step inference)
-        self.transition.actions = self.actor_critic.act(obs, seq_dim=False).detach()
-        self.transition.values = self.actor_critic.evaluate(critic_obs, seq_dim=False).detach()
+        # Compute the actions and values
+        self.transition.actions = self.actor_critic.act(obs).detach()
+        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
@@ -117,35 +117,20 @@ class PPO:
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-    def _masked_mean(self, tensor, mask):
-        """Compute mean of tensor values where mask is True."""
-        if mask is None:
-            return tensor.mean()
-        mask = mask.unsqueeze(-1) if mask.dim() < tensor.dim() else mask
-        return (tensor * mask).sum() / mask.sum().clamp(min=1)
-
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
-        num_updates = 0
-        
         if self.actor_critic.is_recurrent:
-            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
 
-                # Skip if no valid samples in this batch (for recurrent)
-                if masks_batch is not None and not masks_batch.any():
-                    continue
-                
-                num_updates += 1
 
-                self.actor_critic.act(obs_batch, seq_dim=True, hidden_states=hid_states_batch[0])
+                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, seq_dim=True, hidden_states=hid_states_batch[1])
+                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
@@ -155,7 +140,7 @@ class PPO:
                     with torch.inference_mode():
                         kl = torch.sum(
                             torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = self._masked_mean(kl, masks_batch)
+                        kl_mean = torch.mean(kl)
 
                         if kl_mean > self.desired_kl * 2.0:
                             self.learning_rate = max(1e-5, self.learning_rate / 1.5)
@@ -171,7 +156,7 @@ class PPO:
                 surrogate = -torch.squeeze(advantages_batch) * ratio
                 surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
                                                                                 1.0 + self.clip_param)
-                surrogate_loss = self._masked_mean(torch.max(surrogate, surrogate_clipped), masks_batch)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
                 # Value function loss
                 if self.use_clipped_value_loss:
@@ -179,12 +164,11 @@ class PPO:
                                                                                                     self.clip_param)
                     value_losses = (value_batch - returns_batch).pow(2)
                     value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                    value_loss = self._masked_mean(torch.max(value_losses, value_losses_clipped), masks_batch)
+                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
                 else:
-                    value_loss = self._masked_mean((returns_batch - value_batch).pow(2), masks_batch)
+                    value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                entropy_loss = self._masked_mean(entropy_batch, masks_batch)
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_loss
+                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
                 # Gradient step
                 self.optimizer.zero_grad()
@@ -195,9 +179,9 @@ class PPO:
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
 
-        if num_updates > 0:
-            mean_value_loss /= num_updates
-            mean_surrogate_loss /= num_updates
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_value_loss /= num_updates
+        mean_surrogate_loss /= num_updates
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss

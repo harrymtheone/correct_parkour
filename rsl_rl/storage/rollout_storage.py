@@ -31,6 +31,7 @@
 import torch
 import numpy as np
 
+from rsl_rl.utils import split_and_pad_trajectories
 
 class RolloutStorage:
     class Transition:
@@ -181,38 +182,32 @@ class RolloutStorage:
                 yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
                        old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None
 
-    # for RNNs only - simple masking approach
-    def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        """Generate mini-batches for recurrent policy training with proper masking.
-        
-        For each environment, creates a mask that is True for valid steps and False
-        for steps after a done signal. E.g., if dones = [F, F, F, T, F], 
-        mask = [T, T, T, T, F] (the done step itself is valid, but steps after are not).
-        """
-        # Create valid mask: steps after done are invalid
-        # dones shape: (num_transitions, num_envs, 1)
-        # cumsum > 0 marks all steps after (and including) the first done
-        # We want to keep the done step valid, so we shift: mask invalid = cumsum of previous dones > 0
-        dones_float = self.dones.float()
-        # Shift dones by 1 step (prepend zeros) to mark steps AFTER done as invalid
-        shifted_dones = torch.cat([torch.zeros_like(dones_float[:1]), dones_float[:-1]], dim=0)
-        valid_mask = ~(torch.cumsum(shifted_dones, dim=0) > 0)  # (num_transitions, num_envs, 1)
-        valid_mask = valid_mask.squeeze(-1)  # (num_transitions, num_envs)
+    # for RNNs only
+    def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
+
+        padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        if self.privileged_observations is not None: 
+            padded_critic_obs_trajectories, _ = split_and_pad_trajectories(self.privileged_observations, self.dones)
+        else: 
+            padded_critic_obs_trajectories = padded_obs_trajectories
 
         mini_batch_size = self.num_envs // num_mini_batches
-        
-        for epoch in range(num_epochs):
+        for ep in range(num_epochs):
+            first_traj = 0
             for i in range(num_mini_batches):
-                start = i * mini_batch_size
-                stop = (i + 1) * mini_batch_size
+                start = i*mini_batch_size
+                stop = (i+1)*mini_batch_size
 
-                # Slice data for this mini-batch (all timesteps, subset of envs)
-                masks_batch = valid_mask[:, start:stop]
-                obs_batch = self.observations[:, start:stop]
-                if self.privileged_observations is not None:
-                    critic_obs_batch = self.privileged_observations[:, start:stop]
-                else:
-                    critic_obs_batch = obs_batch
+                dones = self.dones.squeeze(-1)
+                last_was_done = torch.zeros_like(dones, dtype=torch.bool)
+                last_was_done[1:] = dones[:-1]
+                last_was_done[0] = True
+                trajectories_batch_size = torch.sum(last_was_done[:, start:stop])
+                last_traj = first_traj + trajectories_batch_size
+                
+                masks_batch = trajectory_masks[:, first_traj:last_traj]
+                obs_batch = padded_obs_trajectories[:, first_traj:last_traj]
+                critic_obs_batch = padded_critic_obs_trajectories[:, first_traj:last_traj]
 
                 actions_batch = self.actions[:, start:stop]
                 old_mu_batch = self.mu[:, start:stop]
@@ -222,16 +217,19 @@ class RolloutStorage:
                 values_batch = self.values[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
 
-                # Get initial hidden states (from step 0)
-                # Clone to convert inference tensors to normal tensors for autograd
-                hid_a_batch = None
-                hid_c_batch = None
-                if self.saved_hidden_states_a is not None:
-                    hid_a_batch = [h[0, :, start:stop, :].clone() for h in self.saved_hidden_states_a]
-                    hid_c_batch = [h[0, :, start:stop, :].clone() for h in self.saved_hidden_states_c]
-                    # Remove tuple wrapper for GRU
-                    hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else tuple(hid_a_batch)
-                    hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else tuple(hid_c_batch)
+                # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])
+                # then take only time steps after dones (flattens num envs and time dimensions),
+                # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
+                last_was_done = last_was_done.permute(1, 0)
+                hid_a_batch = [ saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj].transpose(1, 0).contiguous()
+                                for saved_hidden_states in self.saved_hidden_states_a ] 
+                hid_c_batch = [ saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj].transpose(1, 0).contiguous()
+                                for saved_hidden_states in self.saved_hidden_states_c ]
+                # remove the tuple for GRU
+                hid_a_batch = hid_a_batch[0] if len(hid_a_batch)==1 else hid_a_batch
+                hid_c_batch = hid_c_batch[0] if len(hid_c_batch)==1 else hid_a_batch
 
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, \
                        old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch
+                
+                first_traj = last_traj

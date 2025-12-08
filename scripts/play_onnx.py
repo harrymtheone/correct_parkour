@@ -11,25 +11,25 @@ import torch
 import onnxruntime as ort
 
 def play(args):
-    cfg = task_registry.get_cfg(name=args.task)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     
     # Import ONNX model first to check batch size constraints if possible, 
     # but here we assume batch_size=1 for standard exported models.
     # Warning: Standard exported ONNX models have fixed batch size 1.
     # We enforce num_envs = 1 to match the model.
-    cfg.env.num_envs = 1 
+    env_cfg.env.num_envs = 1 
     
-    cfg.terrain.num_rows = 5
-    cfg.terrain.num_cols = 5
-    cfg.terrain.curriculum = False
-    cfg.noise.add_noise = False
-    cfg.domain_rand.randomize_friction = False
-    cfg.domain_rand.push_robots = False
+    env_cfg.terrain.num_rows = 5
+    env_cfg.terrain.num_cols = 5
+    env_cfg.terrain.curriculum = False
+    env_cfg.noise.add_noise = False
+    env_cfg.domain_rand.randomize_friction = False
+    env_cfg.domain_rand.push_robots = False
 
-    cfg.env.test = True
+    env_cfg.env.test = True
 
     # prepare environment
-    env, _ = task_registry.make_env(name=args.task, args=args, cfg=cfg)
+    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
     
     # Hardcoded ONNX model path - Updated to user's path
