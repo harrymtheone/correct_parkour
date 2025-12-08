@@ -8,14 +8,14 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 from rsl_rl.algorithms import algorithm_dict
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import runner_dict
-from .helpers import get_args, update_cfg_from_args, get_load_path, set_seed, init_config
+from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params, init_config
 
 
 class TaskRegistry():
     def __init__(self):
         self.task_classes = {}
         self.task_cfgs = {}
-
+    
     def register(self, name: str, task_class: VecEnv, cfg_class: type):
         """Register a task with its config class.
         
@@ -26,10 +26,10 @@ class TaskRegistry():
         """
         self.task_classes[name] = task_class
         self.task_cfgs[name] = cfg_class
-
+    
     def get_task_class(self, name: str) -> type[VecEnv]:
         return self.task_classes[name]
-
+    
     def get_cfgs(self, name) -> LeggedRobotCfg:
         """Get initialized config instance for a registered task.
         
@@ -37,7 +37,7 @@ class TaskRegistry():
         """
         cfg = init_config(self.task_cfgs[name])
         return cfg
-
+    
     def make(self, name, args=None, cfg=None, log_root="default"):
         """Creates environment, algorithm, and runner from a registered task name.
 
@@ -72,13 +72,16 @@ class TaskRegistry():
         cfg, _ = update_cfg_from_args(cfg, None, args)
         set_seed(cfg.seed)
 
-        # Update simulator config from args
-        cfg.simulator.sim_device = args.sim_device
-        cfg.simulator.headless = args.headless
-        cfg.simulator.physics_engine = args.physics_engine
-
         # Create environment
-        env = env_class(cfg=cfg)
+        sim_params = {"sim": class_to_dict(cfg.sim)}
+        sim_params = parse_sim_params(args, sim_params)
+        env = env_class(
+            cfg=cfg,
+            sim_params=sim_params,
+            physics_engine=args.physics_engine,
+            sim_device=args.sim_device,
+            headless=args.headless
+        )
 
         # Setup logging directory
         if log_root == "default":
@@ -88,7 +91,7 @@ class TaskRegistry():
             log_dir = None
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + cfg.runner.run_name)
-
+        
         cfg.runner.log_dir = log_dir
 
         # Create algorithm and runner
