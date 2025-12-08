@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-from isaacgym import gymtorch
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 
@@ -36,10 +35,8 @@ class G1BaselineEnv(LeggedRobot):
     def _init_foot(self):
         self.feet_num = len(self.feet_indices)
         
-        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state)
-        self.rigid_body_states_view = self.rigid_body_states.view(self.num_envs, -1, 13)
-        self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
+        # Use simulator's rigid body states
+        self.feet_state = self.sim.rigid_body_states_view[:, self.feet_indices, :]
         self.feet_pos = self.feet_state[:, :, :3]
         self.feet_vel = self.feet_state[:, :, 7:10]
         
@@ -55,9 +52,9 @@ class G1BaselineEnv(LeggedRobot):
         self.leg_phase = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
 
     def update_feet_state(self):
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        self.sim.refresh_rigid_body_state_tensor()
         
-        self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
+        self.feet_state = self.sim.rigid_body_states_view[:, self.feet_indices, :]
         self.feet_pos = self.feet_state[:, :, :3]
         self.feet_vel = self.feet_state[:, :, 7:10]
         
@@ -66,7 +63,7 @@ class G1BaselineEnv(LeggedRobot):
 
         period = 0.8
         offset = 0.5
-        self.phase = (self.episode_length_buf * self.dt) % period / period
+        self.phase = (self.episode_length_buf * self.step_dt) % period / period
         self.phase_left = self.phase
         self.phase_right = (self.phase + offset) % 1
         self.leg_phase = torch.cat([self.phase_left.unsqueeze(1), self.phase_right.unsqueeze(1)], dim=-1)
@@ -81,27 +78,28 @@ class G1BaselineEnv(LeggedRobot):
         obs_buf = torch.cat(
             (
                 self.base_ang_vel * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions,
-                                    sin_phase,
-                                    cos_phase
+                self.projected_gravity,
+                self.commands[:, :3] * self.commands_scale,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                self.dof_vel * self.obs_scales.dof_vel,
+                self.actions,
+                sin_phase,
+                cos_phase
             ),
             dim=-1
         )
         privileged_obs_buf = torch.cat(
-            (self.base_lin_vel * self.obs_scales.lin_vel,
-             self.base_ang_vel * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions,
-                                    sin_phase,
-                                    cos_phase
-             ),
+            (
+                self.base_lin_vel * self.obs_scales.lin_vel,
+                self.base_ang_vel * self.obs_scales.ang_vel,
+                self.projected_gravity,
+                self.commands[:, :3] * self.commands_scale,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                self.dof_vel * self.obs_scales.dof_vel,
+                self.actions,
+                sin_phase,
+                cos_phase
+            ),
             dim=-1
         )
         # add perceptive inputs if not blind
