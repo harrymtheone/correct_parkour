@@ -34,6 +34,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.nn.modules import rnn
+from rsl_rl.modules.utils import wrapper
 
 class ActorCritic(nn.Module):
     is_recurrent = False
@@ -116,12 +117,12 @@ class ActorCritic(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
-    def update_distribution(self, observations):
-        mean = self.actor(observations)
+    def update_distribution(self, observations, seq_dim=False):
+        mean = wrapper(self.actor, observations, seq_dim=seq_dim)
         self.distribution = Normal(mean, mean*0. + self.std)
 
-    def act(self, observations, **kwargs):
-        self.update_distribution(observations)
+    def act(self, observations, seq_dim=False, **kwargs):
+        self.update_distribution(observations, seq_dim=seq_dim)
         return self.distribution.sample()
     
     def get_actions_log_prob(self, actions):
@@ -131,8 +132,8 @@ class ActorCritic(nn.Module):
         actions_mean = self.actor(observations)
         return actions_mean
 
-    def evaluate(self, critic_observations, **kwargs):
-        value = self.critic(critic_observations)
+    def evaluate(self, critic_observations, seq_dim=False, **kwargs):
+        value = wrapper(self.critic, critic_observations, seq_dim=seq_dim)
         return value
 
 def get_activation(act_name):

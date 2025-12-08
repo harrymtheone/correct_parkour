@@ -28,14 +28,12 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import numpy as np
-
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from torch.nn.modules import rnn
 from .actor_critic import ActorCritic, get_activation
-from rsl_rl.utils import unpad_trajectories
+from rsl_rl.modules.utils import wrapper
+
 
 class ActorCriticRecurrent(ActorCritic):
     is_recurrent = True
@@ -69,48 +67,97 @@ class ActorCriticRecurrent(ActorCritic):
         print(f"Actor RNN: {self.memory_a}")
         print(f"Critic RNN: {self.memory_c}")
 
-    def reset(self, dones=None):
-        self.memory_a.reset(dones)
-        self.memory_c.reset(dones)
+    def init_hidden_states(self, num_envs: int, device: str):
+        """Initialize hidden states for actor and critic RNNs.
+        
+        Returns:
+            actor_hidden: Hidden state(s) for actor RNN
+            critic_hidden: Hidden state(s) for critic RNN
+        """
+        actor_hidden = self.memory_a.init_hidden_states(num_envs, device)
+        critic_hidden = self.memory_c.init_hidden_states(num_envs, device)
+        return actor_hidden, critic_hidden
 
-    def act(self, observations, masks=None, hidden_states=None):
-        input_a = self.memory_a(observations, masks, hidden_states)
-        return super().act(input_a.squeeze(0))
+    def act(self, observations, hidden_states=None, seq_dim=False):
+        """Forward pass through actor.
+        
+        Args:
+            observations: Input observations
+            hidden_states: Hidden states for RNN (required for both seq_dim modes now)
+            seq_dim: Whether input has sequence dimension
+            
+        Returns:
+            actions: Sampled actions
+            new_hidden_states: Updated hidden states (only for seq_dim=False)
+        """
+        output, new_hidden = self.memory_a(observations, hidden_states, seq_dim=seq_dim)
+        actions = super().act(output, seq_dim=seq_dim)
+        if seq_dim:
+            return actions
+        else:
+            return actions, new_hidden
 
-    def act_inference(self, observations):
-        input_a = self.memory_a(observations)
-        return super().act_inference(input_a.squeeze(0))
+    def act_inference(self, observations, hidden_states):
+        """Inference mode action selection.
+        
+        Returns:
+            actions: Mean actions (no sampling)
+            new_hidden_states: Updated hidden states
+        """
+        output, new_hidden = self.memory_a(observations, hidden_states, seq_dim=False)
+        actions = super().act_inference(output)
+        return actions, new_hidden
 
-    def evaluate(self, critic_observations, masks=None, hidden_states=None):
-        input_c = self.memory_c(critic_observations, masks, hidden_states)
-        return super().evaluate(input_c.squeeze(0))
-    
-    def get_hidden_states(self):
-        return self.memory_a.hidden_states, self.memory_c.hidden_states
+    def evaluate(self, critic_observations, hidden_states=None, seq_dim=False):
+        """Forward pass through critic.
+        
+        Returns:
+            values: Value estimates
+            new_hidden_states: Updated hidden states (only for seq_dim=False)
+        """
+        output, new_hidden = self.memory_c(critic_observations, hidden_states, seq_dim=seq_dim)
+        values = super().evaluate(output, seq_dim=seq_dim)
+        if seq_dim:
+            return values
+        else:
+            return values, new_hidden
 
 
 class Memory(torch.nn.Module):
     def __init__(self, input_size, type='lstm', num_layers=1, hidden_size=256):
         super().__init__()
         # RNN
-        rnn_cls = nn.GRU if type.lower() == 'gru' else nn.LSTM
+        self.rnn_type = type.lower()
+        rnn_cls = nn.GRU if self.rnn_type == 'gru' else nn.LSTM
         self.rnn = rnn_cls(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
-        self.hidden_states = None
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
     
-    def forward(self, input, masks=None, hidden_states=None):
-        batch_mode = masks is not None
-        if batch_mode:
-            # batch mode (policy update): need saved hidden states
-            if hidden_states is None:
-                raise ValueError("Hidden states not passed to memory module during policy update")
-            out, _ = self.rnn(input, hidden_states)
-            out = unpad_trajectories(out, masks)
+    def init_hidden_states(self, num_envs: int, device: str):
+        """Initialize hidden states.
+        
+        Returns:
+            For LSTM: tuple (h, c) each of shape [num_layers, num_envs, hidden_size]
+            For GRU: tensor of shape [num_layers, num_envs, hidden_size]
+        """
+        h = torch.zeros(self.num_layers, num_envs, self.hidden_size, device=device)
+        if self.rnn_type == 'lstm':
+            c = torch.zeros(self.num_layers, num_envs, self.hidden_size, device=device)
+            return (h, c)
         else:
-            # inference mode (collection): use hidden states of last step
-            out, self.hidden_states = self.rnn(input.unsqueeze(0), self.hidden_states)
-        return out
-
-    def reset(self, dones=None):
-        # When the RNN is an LSTM, self.hidden_states_a is a list with hidden_state and cell_state
-        for hidden_state in self.hidden_states:
-            hidden_state[..., dones, :] = 0.0
+            return h
+    
+    def forward(self, input, hidden_states, seq_dim=False):
+        """Forward pass through RNN.
+        
+        Args:
+            input: Input tensor
+            hidden_states: Hidden states (required)
+            seq_dim: Whether input has sequence dimension
+            
+        Returns:
+            output: RNN output
+            new_hidden_states: Updated hidden states
+        """
+        output, new_hidden = wrapper(self.rnn, (input, hidden_states), seq_dim=seq_dim)
+        return output, new_hidden

@@ -28,4 +28,11 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from .ppo import PPO
+from .alg_base import BaseAlgorithm
+from .baseline import PPOBaseline
+from .dreamwaq import PPODreamWaQ
+
+algorithm_dict = {
+    'baseline': PPOBaseline,
+    'ppo_dreamwaq': PPODreamWaQ,
+}

@@ -30,7 +30,7 @@
 
 from abc import ABC, abstractmethod
 import torch
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict
 
 # minimal interface of the environment
 class VecEnv(ABC):
@@ -39,22 +39,34 @@ class VecEnv(ABC):
     num_privileged_obs: int
     num_actions: int
     max_episode_length: int
-    privileged_obs_buf: torch.Tensor
-    obs_buf: torch.Tensor 
+    obs_buf: Union[torch.Tensor, Dict[str, torch.Tensor]]
     rew_buf: torch.Tensor
     reset_buf: torch.Tensor
     episode_length_buf: torch.Tensor # current episode duration
     extras: dict
     device: torch.device
+
     @abstractmethod
-    def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, Union[torch.Tensor, None], torch.Tensor, torch.Tensor, dict]:
+    def step(self, actions: torch.Tensor) -> Tuple[Union[torch.Tensor, Dict[str, torch.Tensor]], torch.Tensor, torch.Tensor, dict]:
+        """Take a step in all environments.
+        
+        Args:
+            actions: Actions tensor [num_envs, num_actions]
+            
+        Returns:
+            obs: Observations (tensor or dict of tensors)
+            rewards: Reward tensor [num_envs]
+            dones: Done flags [num_envs]
+            extras: Extra information dict
+        """
         pass
+
     @abstractmethod
-    def reset(self, env_ids: Union[list, torch.Tensor]):
-        pass
-    @abstractmethod
-    def get_observations(self) -> torch.Tensor:
-        pass
-    @abstractmethod
-    def get_privileged_observations(self) -> Union[torch.Tensor, None]:
+    def reset(self) -> Tuple[Union[torch.Tensor, Dict[str, torch.Tensor]], dict]:
+        """Reset all environments.
+        
+        Returns:
+            obs: Observations (tensor or dict of tensors)
+            extras: Extra information dict
+        """
         pass

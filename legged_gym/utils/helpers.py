@@ -1,5 +1,6 @@
 import os
 import copy
+import inspect
 import torch
 import numpy as np
 import random
@@ -7,6 +8,54 @@ from isaacgym import gymapi
 from isaacgym import gymutil
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
+from dataclasses import MISSING
+
+
+def init_config(cfg_class):
+    """Initializes a config class by instantiating all nested member classes recursively.
+    
+    Takes a config class type and returns an instance with all nested class attributes
+    converted to instances.
+    
+    Args:
+        cfg_class: A config class type (not an instance)
+        
+    Returns:
+        An instance of cfg_class with all nested classes instantiated
+        
+    Raises:
+        ValueError: If any attribute has the value MISSING
+    """
+    obj = cfg_class()
+    _init_member_classes(obj, path=cfg_class.__name__)
+    return obj
+
+
+def _init_member_classes(obj, path: str):
+    """Recursively instantiate all member classes of an object.
+    
+    Iterates over all attributes, finds classes, instantiates them,
+    and recursively does the same for nested classes.
+    
+    Args:
+        obj: The object to process
+        path: The current path for error messages
+        
+    Raises:
+        ValueError: If any attribute has the value MISSING
+    """
+    for key in dir(obj):
+        if key.startswith("_"):
+            continue
+        var = getattr(obj, key)
+        attr_path = f"{path}.{key}"
+        if var is MISSING:
+            raise ValueError(f"Missing required config value at: {attr_path}")
+        if inspect.isclass(var):
+            i_var = var()
+            setattr(obj, key, i_var)
+            _init_member_classes(i_var, path=attr_path)
+
 
 def class_to_dict(obj) -> dict:
     if not  hasattr(obj,"__dict__"):
@@ -94,30 +143,38 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     load_path = os.path.join(load_run, model)
     return load_path
 
-def update_cfg_from_args(env_cfg, cfg_train, args):
-    # seed
-    if env_cfg is not None:
+def update_cfg_from_args(cfg, _, args):
+    """Update config from command line arguments.
+    
+    Args:
+        cfg: The unified config object
+        _: Unused (kept for backward compatibility)
+        args: Command line arguments
+        
+    Returns:
+        Tuple of (cfg, None) for backward compatibility
+    """
+    if cfg is not None:
         # num envs
         if args.num_envs is not None:
-            env_cfg.env.num_envs = args.num_envs
-    if cfg_train is not None:
+            cfg.env.num_envs = args.num_envs
         if args.seed is not None:
-            cfg_train.seed = args.seed
+            cfg.seed = args.seed
         # alg runner parameters
         if args.max_iterations is not None:
-            cfg_train.runner.max_iterations = args.max_iterations
+            cfg.runner.max_iterations = args.max_iterations
         if args.resume:
-            cfg_train.runner.resume = args.resume
+            cfg.runner.resume = args.resume
         if args.experiment_name is not None:
-            cfg_train.runner.experiment_name = args.experiment_name
+            cfg.runner.experiment_name = args.experiment_name
         if args.run_name is not None:
-            cfg_train.runner.run_name = args.run_name
+            cfg.runner.run_name = args.run_name
         if args.load_run is not None:
-            cfg_train.runner.load_run = args.load_run
+            cfg.runner.load_run = args.load_run
         if args.checkpoint is not None:
-            cfg_train.runner.checkpoint = args.checkpoint
+            cfg.runner.checkpoint = args.checkpoint
 
-    return env_cfg, cfg_train
+    return cfg, None
 
 def get_args():
     custom_parameters = [
