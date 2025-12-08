@@ -15,8 +15,8 @@ class PPOBaselineCfg:
     networks: ActorCriticRecurrentCfg = ActorCriticRecurrentCfg()
 
     class ppo:
-        num_learning_epochs: int = 1
-        num_mini_batches: int = 1
+        num_learning_epochs: int = 5
+        num_mini_batches: int = 4
         clip_param: float = 0.2
         gamma: float = 0.998
         lam: float = 0.95
@@ -70,7 +70,7 @@ class PPOBaseline(BaseAlgorithm):
             self.actor_hidden, self.critic_hidden = self.actor_critic.init_hidden_states(self.num_envs, self.device)
 
     def eval(self):
-        self.actor_critic.test()
+        self.actor_critic.eval()
 
     def train(self):
         self.actor_critic.train()
@@ -173,6 +173,11 @@ class PPOBaseline(BaseAlgorithm):
     def update(self, cur_it: int = 0, **kwargs) -> dict[str, float]:
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        
+        # Debug: check if storage tensors are inference tensors (uncomment to debug)
+        # for name, buf in self.storage.storage.items():
+        #     print(f"{name}: is_inference={buf.buf.is_inference()}")
+        
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -260,6 +265,14 @@ class PPOBaseline(BaseAlgorithm):
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        
+        # Debug: print gradient stats (uncomment to debug)
+        # total_grad_norm = 0
+        # for p in self.actor_critic.parameters():
+        #     if p.grad is not None:
+        #         total_grad_norm += p.grad.data.norm(2).item() ** 2
+        # print(f"Total grad norm: {total_grad_norm ** 0.5:.4f}, num_updates: {num_updates}")
+        
         self.storage.clear()
 
         return {

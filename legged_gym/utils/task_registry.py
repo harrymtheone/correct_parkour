@@ -15,7 +15,7 @@ class TaskRegistry():
     def __init__(self):
         self.task_classes = {}
         self.task_cfgs = {}
-
+    
     def register(self, name: str, task_class: VecEnv, cfg_class: type):
         """Register a task with its config class.
         
@@ -26,10 +26,10 @@ class TaskRegistry():
         """
         self.task_classes[name] = task_class
         self.task_cfgs[name] = cfg_class
-
+    
     def get_task_class(self, name: str) -> type[VecEnv]:
         return self.task_classes[name]
-
+    
     def get_cfgs(self, name) -> LeggedRobotCfg:
         """Get initialized config instance for a registered task.
         
@@ -37,7 +37,7 @@ class TaskRegistry():
         """
         cfg = init_config(self.task_cfgs[name])
         return cfg
-
+    
     def make(self, name, args=None, cfg=None, log_root="default"):
         """Creates environment, algorithm, and runner from a registered task name.
 
@@ -91,7 +91,7 @@ class TaskRegistry():
             log_dir = None
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + cfg.runner.run_name)
-
+        
         cfg.runner.log_dir = log_dir
 
         # Create algorithm and runner
