@@ -21,7 +21,7 @@ def play(args):
 
     runner, cfg = task_registry.make(name=args.task, args=args, cfg=cfg)
     policy = runner.get_inference_policy(device=runner.env.device)
-    
+
     # export policy as a jit module (used to run it from C++)
     if EXPORT_POLICY:
         path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', cfg.runner.experiment_name, 'exported', 'policies')

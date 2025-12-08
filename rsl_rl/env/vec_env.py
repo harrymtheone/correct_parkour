@@ -35,8 +35,11 @@ from typing import Tuple, Union, Dict
 # minimal interface of the environment
 class VecEnv(ABC):
     num_envs: int
+    num_obs: int
+    num_privileged_obs: int
     num_actions: int
     max_episode_length: int
+    obs_buf: Union[torch.Tensor, Dict[str, torch.Tensor]]
     rew_buf: torch.Tensor
     reset_buf: torch.Tensor
     episode_length_buf: torch.Tensor # current episode duration
