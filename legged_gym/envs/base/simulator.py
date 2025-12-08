@@ -3,20 +3,16 @@ import sys
 
 import numpy as np
 import torch
-from isaacgym import gymapi
-from isaacgym import gymutil
+from isaacgym import gymapi, gymutil, gymtorch
 from isaacgym.torch_utils import to_torch, torch_rand_float
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from rsl_rl.env import VecEnv
 
-
-class BaseTask(VecEnv):
-    """Base class for RL tasks. Inherits from VecEnv for compatibility with runners."""
-
+class Simulator:
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
         self.gym = gymapi.acquire_gym()
-
+        
+        self.cfg = cfg
         self.sim_params = sim_params
         self.physics_engine = physics_engine
         self.sim_device = sim_device
@@ -35,68 +31,33 @@ class BaseTask(VecEnv):
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs
-        self.num_actions = cfg.env.num_actions
-
-        # optimization flags for pytorch JIT
-        torch._C._jit_set_profiling_mode(False)
-        torch._C._jit_set_profiling_executor(False)
-
-        # allocate buffers
-        self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
-        self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
-        self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
-        self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-
-        self.extras = {}
-
-        # create envs, sim and viewer
-        self.create_sim()
-        self.gym.prepare_sim(self.sim)
-
-        # todo: read from config
-        self.enable_viewer_sync = True
+        self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
+        self.sim = None
         self.viewer = None
+        self.enable_viewer_sync = True
 
-        # if running with a viewer, set up keyboard shortcuts and camera
+        # Buffers
+        self.root_states = None
+        self.dof_state = None
+        self.net_contact_forces = None
+        self.rigid_body_state = None
+
+    def create_sim(self, robot_callbacks=None):
+        """Creates simulation, terrain and environments."""
+        self.sim = self.gym.create_sim(
+            self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params
+        )
+        self._create_ground_plane()
+        self._create_envs(robot_callbacks)
+        
+        # If running with a viewer, set up keyboard shortcuts and camera
         if not self.headless:
-            # subscribe to keyboard shortcuts
             self.viewer = self.gym.create_viewer(
                 self.sim, gymapi.CameraProperties())
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_ESCAPE, "QUIT")
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
-
-    def _reset_idx(self, env_ids):
-        """Reset selected robots"""
-        raise NotImplementedError
-
-    def reset(self):
-        """Reset all robots.
-        
-        Returns:
-            obs: Observations from compute_observations()
-            extras: Extra information dict
-        """
-        self._reset_idx(torch.arange(self.num_envs, device=self.device))
-        self.obs_buf = self.compute_observations()
-        return self.obs_buf, self.extras
-
-    def step(self, actions):
-        raise NotImplementedError
-
-    def compute_observations(self):
-        """Compute observations. Must be implemented by subclass."""
-        raise NotImplementedError
-
-    def create_sim(self):
-        """Creates simulation, terrain and environments."""
-        self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
-        self.sim = self.gym.create_sim(
-            self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params
-        )
-        self._create_ground_plane()
-        self._create_envs()
 
     def _create_ground_plane(self):
         """Adds a ground plane to the simulation, sets friction and restitution based on the cfg."""
@@ -107,7 +68,7 @@ class BaseTask(VecEnv):
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
 
-    def _create_envs(self):
+    def _create_envs(self, callbacks):
         """Creates environments:
             1. loads the robot URDF/MJCF asset,
             2. For each environment
@@ -164,6 +125,12 @@ class BaseTask(VecEnv):
         env_upper = gymapi.Vec3(0., 0., 0.)
         self.actor_handles = []
         self.envs = []
+        
+        # Default callbacks if not provided
+        process_rigid_shape_props = callbacks.get('process_rigid_shape_props') if callbacks else None
+        process_dof_props = callbacks.get('process_dof_props') if callbacks else None
+        process_rigid_body_props = callbacks.get('process_rigid_body_props') if callbacks else None
+
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
@@ -171,14 +138,23 @@ class BaseTask(VecEnv):
             pos[:2] += torch_rand_float(-1., 1., (2, 1), device=self.device).squeeze(1)
             start_pose.p = gymapi.Vec3(*pos)
 
-            rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
+            rigid_shape_props = rigid_shape_props_asset
+            if process_rigid_shape_props:
+                rigid_shape_props = process_rigid_shape_props(rigid_shape_props, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
+            
             actor_handle = self.gym.create_actor(env_handle, robot_asset, start_pose, self.cfg.asset.name, i, self.cfg.asset.self_collisions, 0)
-            dof_props = self._process_dof_props(dof_props_asset, i)
+            
+            dof_props = dof_props_asset
+            if process_dof_props:
+                dof_props = process_dof_props(dof_props, i)
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
+            
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
-            body_props = self._process_rigid_body_props(body_props, i)
+            if process_rigid_body_props:
+                body_props = process_rigid_body_props(body_props, i)
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
+            
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
 
@@ -195,37 +171,33 @@ class BaseTask(VecEnv):
             self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], termination_contact_names[i])
 
     def _get_env_origins(self):
-        """Sets environment origins. On rough terrain the origins are defined by the terrain platforms.
-           Otherwise create a grid.
-        """
+        """Sets environment origins."""
         self.custom_origins = False
         self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
         # create a grid of robots
         num_cols = np.floor(np.sqrt(self.num_envs))
         num_rows = np.ceil(self.num_envs / num_cols)
-        xx, yy = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
+        xx, yy = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols), indexing='ij')
         spacing = self.cfg.env.env_spacing
         self.env_origins[:, 0] = spacing * xx.flatten()[:self.num_envs]
         self.env_origins[:, 1] = spacing * yy.flatten()[:self.num_envs]
         self.env_origins[:, 2] = 0.
 
-    def _process_rigid_shape_props(self, props, env_id):
-        """Callback allowing to store/change/randomize the rigid shape properties of each environment.
-           Called during environment creation. Override in subclass to customize.
-        """
-        return props
+    def init_buffers(self):
+        """Initialize torch tensors which will contain simulation states and processed quantities."""
+        # get gym GPU state tensors
+        actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
+        net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
+        self.gym.prepare_sim(self.sim)
+        self.gym.refresh_dof_state_tensor(self.sim)
+        self.gym.refresh_actor_root_state_tensor(self.sim)
+        self.gym.refresh_net_contact_force_tensor(self.sim)
 
-    def _process_dof_props(self, props, env_id):
-        """Callback allowing to store/change/randomize the DOF properties of each environment.
-           Called during environment creation. Override in subclass to customize.
-        """
-        return props
-
-    def _process_rigid_body_props(self, props, env_id):
-        """Callback allowing to store/change/randomize the rigid body properties of each environment.
-           Called during environment creation. Override in subclass to customize.
-        """
-        return props
+        # create some wrapper tensors for different slices
+        self.root_states = gymtorch.wrap_tensor(actor_root_state)
+        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
+        self.net_contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)  # shape: num_envs, num_bodies, xyz axis
 
     def render(self, sync_frame_time=True):
         if self.viewer:
@@ -252,3 +224,20 @@ class BaseTask(VecEnv):
                     self.gym.sync_frame_time(self.sim)
             else:
                 self.gym.poll_viewer_events(self.viewer)
+
+    @property
+    def root_pos_w(self):
+        return self.root_states[:, 0:3]
+
+    @property
+    def root_quat_w(self):
+        return self.root_states[:, 3:7]
+
+    @property
+    def root_lin_vel_w(self):
+        return self.root_states[:, 7:10]
+
+    @property
+    def root_ang_vel_w(self):
+        return self.root_states[:, 10:13]
+

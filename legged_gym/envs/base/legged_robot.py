@@ -2,19 +2,21 @@ import os
 import time
 from typing import Dict
 
+import numpy as np
 import torch
 from isaacgym import gymtorch, gymapi
 from isaacgym.torch_utils import *
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.envs.base.base_task import BaseTask
+from .simulator import Simulator
+from rsl_rl.env import VecEnv
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
 from legged_gym.utils.math import wrap_to_pi
 from .legged_robot_config import LeggedRobotCfg
 
 
-class LeggedRobot(BaseTask):
+class LeggedRobot(VecEnv):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation and environments),
@@ -34,13 +36,74 @@ class LeggedRobot(BaseTask):
         self.debug_viz = False
         self.init_done = False
         self._parse_cfg(self.cfg)
-        super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
+        
+        self.simulator = Simulator(self.cfg, sim_params, physics_engine, sim_device, headless)
+        self.gym = self.simulator.gym
+        self.sim_device = sim_device
+        self.headless = headless
+        self.device = self.simulator.device
+        self.graphics_device_id = self.simulator.graphics_device_id
+        
+        self.num_envs = cfg.env.num_envs
+        self.num_actions = cfg.env.num_actions
+        
+        # optimization flags for pytorch JIT
+        torch._C._jit_set_profiling_mode(False)
+        torch._C._jit_set_profiling_executor(False)
+
+        # allocate buffers
+        self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
+        self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.extras = {}
+        
+        # create envs, sim and viewer
+        callbacks = {
+            "process_rigid_shape_props": self._process_rigid_shape_props,
+            "process_dof_props": self._process_dof_props,
+            "process_rigid_body_props": self._process_rigid_body_props,
+        }
+        self.simulator.create_sim(callbacks)
+        self.sim = self.simulator.sim
+        self.viewer = self.simulator.viewer
+
+        self.num_dof = self.simulator.num_dof
+        self.num_bodies = self.simulator.num_bodies
+        self.dof_names = self.simulator.dof_names
+        self.feet_indices = self.simulator.feet_indices
+        self.penalised_contact_indices = self.simulator.penalised_contact_indices
+        self.termination_contact_indices = self.simulator.termination_contact_indices
+        self.env_origins = self.simulator.env_origins
+        self.up_axis_idx = self.simulator.up_axis_idx
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+
+    @property
+    def enable_viewer_sync(self):
+        return self.simulator.enable_viewer_sync
+
+    @enable_viewer_sync.setter
+    def enable_viewer_sync(self, value):
+        self.simulator.enable_viewer_sync = value
+
+    def reset(self):
+        """Reset all robots.
+        
+        Returns:
+            obs: Observations from compute_observations()
+            extras: Extra information dict
+        """
+        self._reset_idx(torch.arange(self.num_envs, device=self.device))
+        self.obs_buf = self.compute_observations()
+        return self.obs_buf, self.extras
+
+    def render(self, sync_frame_time=True):
+        self.simulator.render(sync_frame_time)
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -82,11 +145,11 @@ class LeggedRobot(BaseTask):
         self.common_step_counter += 1
 
         # prepare quantities
-        self.base_pos[:] = self.root_states[:, 0:3]
-        self.base_quat[:] = self.root_states[:, 3:7]
+        self.base_pos[:] = self.simulator.root_pos_w
+        self.base_quat[:] = self.simulator.root_quat_w
         self.rpy[:] = get_euler_xyz_in_tensor(self.base_quat[:])
-        self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
-        self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
+        self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.simulator.root_lin_vel_w)
+        self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.simulator.root_ang_vel_w)
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
 
         self._post_physics_step_callback()
@@ -221,9 +284,9 @@ class LeggedRobot(BaseTask):
             [numpy.array]: Modified DOF properties
         """
         if env_id == 0:
-            self.dof_pos_limits = torch.zeros(self.num_dof, 2, dtype=torch.float, device=self.device, requires_grad=False)
-            self.dof_vel_limits = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
-            self.torque_limits = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+            self.dof_pos_limits = torch.zeros(self.simulator.num_dof, 2, dtype=torch.float, device=self.device, requires_grad=False)
+            self.dof_vel_limits = torch.zeros(self.simulator.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+            self.torque_limits = torch.zeros(self.simulator.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
             for i in range(len(props)):
                 self.dof_pos_limits[i, 0] = props["lower"][i].item()
                 self.dof_pos_limits[i, 1] = props["upper"][i].item()
@@ -329,12 +392,12 @@ class LeggedRobot(BaseTask):
             env_ids (List[int]): Environemnt ids
         """
         # base position
-        if self.custom_origins:
-            self.root_states[env_ids] = self.base_init_state
+        if self.simulator.custom_origins:
+            self.root_states[env_ids] = self.simulator.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
             self.root_states[env_ids, :2] += torch_rand_float(-1., 1., (len(env_ids), 2), device=self.device)  # xy position within 1m of the center
         else:
-            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids] = self.simulator.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base velocities
         self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device)  # [7:10]: lin vel, [10:13]: ang vel
@@ -374,22 +437,17 @@ class LeggedRobot(BaseTask):
         """ Initialize torch tensors which will contain simulation states and processed quantities
         """
         # get gym GPU state tensors
-        actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
-        net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
-        self.gym.refresh_dof_state_tensor(self.sim)
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-        self.gym.refresh_net_contact_force_tensor(self.sim)
+        self.simulator.init_buffers()
+        self.root_states = self.simulator.root_states
+        self.dof_state = self.simulator.dof_state
+        self.net_contact_forces = self.simulator.net_contact_forces
 
-        # create some wrapper tensors for different slices
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)
-        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
         self.base_quat = self.root_states[:, 3:7]
         self.rpy = get_euler_xyz_in_tensor(self.base_quat)
         self.base_pos = self.root_states[:self.num_envs, 0:3]
-        self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)  # shape: num_envs, num_bodies, xyz axis
+        self.contact_forces = self.net_contact_forces
 
         # initialize some data used later on
         self.common_step_counter = 0
@@ -415,7 +473,7 @@ class LeggedRobot(BaseTask):
 
         # joint positions offsets and PD gains
         self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
-        for i in range(self.num_dofs):
+        for i in range(self.num_dof):
             name = self.dof_names[i]
             angle = self.cfg.init_state.default_joint_angles[name]
             self.default_dof_pos[i] = angle
